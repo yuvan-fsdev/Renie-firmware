@@ -1,0 +1,204 @@
+# Firmware V3IoTSh1.095 Overview
+
+This file contains the primary firmware implementation for the V3IoTSh1.095 project, developed by Renie R&D. It initializes key hardware components, manages tasks for network connectivity, scanning, uploads, and overall device operation. The firmware is designed for an embedded system using FreeRTOS along with Arduino libraries, establishing connectivity with AWS IoT Core, handling sensor data, and managing multiple compartments.
+
+
+
+- **Global Task Handles**:  
+  - Task handles such as `taskNetworkManager`, `taskScankManager`, `taskWifiConnect`, `taskModemConnect`, and `taskAWSConnect` are created to manage concurrent tasks.
+- **Logger and Preferences**: A `Logger` class (`mLogger`) is used for logging debug and info messages. Preferences (via `prefs`) are used to store and retrieve system configurations.
+- **Compartment Objects**: Four `Compartment` objects (comp1, comp2, comp3, comp4) along with an array pointer are declared. Each compartment corresponds to a physical/dedicated container or sensor module.
+
+---
+
+## Function Overview
+
+### timerCallback()
+- **Purpose**:  
+  Called by the FreeRTOS timer, it decrements `remainingHours` and updates the persistent preferences. If the timer expires (i.e., `remainingHours == 0`), it triggers a failsafe OTA using `switchToFailsafe()`.
+
+### uploadTask() and startUploadTask() Overloads
+- **uploadTask(void *pvParameters)**:  
+  Handles uploading of data to AWS IoT Core. It accepts an `UploadParams` structure with parameters such as type, EAN, timestamp, usage, and count.
+  - For **"bottle" uploads**: constructs the payload using bottle info.
+  - For **"fakedrop" uploads**: uses a JSON document to publish fake drop events.
+  - For **"collection" uploads**: handles collection complete events.
+- **startUploadTask() Overloads**:
+  - Overloaded functions exist to create an upload task according to different types of events (bottle, fakedrop, or collection).  
+  - These functions allocate an `UploadParams` structure, then create a FreeRTOS task that executes the `uploadTask()`.
+
+### scanManager()
+- **Purpose**:  
+  Continuously monitors a barcode scanner for input EAN codes.
+- **Functionality**:
+  - **Scanning Loop**:  
+    Runs in an infinite loop checking if data from `BarSanner` is available.
+  - **Visual Effects & Feedback**:  
+    Depending on the state of compartments (full, captive mode, OTA mode) different RGB patterns are showed.
+
+### setup()
+- **Purpose**:  
+  Called once at startup. It initializes hardware, peripherals, network connectivity, and starts background tasks.
+- **Functionality**:
+  - **Hardware Initialization**:  
+    - Calls `WireDvicesInit()` to initialize ToF Sensors.
+    - Configures RGBs and sets initial effect (calibration effect).
+  - **System Setup**:
+    - Gets chip ID and preferences `Get_ChipID()`.
+    - get preferences of the bin already stored `getPref()`, make comp1 as small-ewaste and comp2 as big-ewaste.
+    - Begins actuators (Servos) `actuatorsBegin()` , print preferences `PrintPref()`, and initializes file systems `filesBegin()`.
+    - Configures system time `configTime(gmtOffset_sec, daylightOffset_sec, ntpServer)` and other parameters `ConfigSystemParam()`.
+    - Set topics based on country via `setTopicBasedOnCountry(devCountry)`.
+    - Detect small-ewaste compartment based on the existing sensors via `DetectCompartment()`.
+    - Detect big-ewaste compartment based on the existing sensors via `EwasteDetectCompartment()`.
+    - Print the sensor readings for the small-ewaste compartment via `printSensorReads()`.
+    - initialize the current sensors via `ina219Init()` & `ina3221Init()`.
+  - **Calibration**:
+    - Calibrates servos for the detected compartments if necessary.
+  - **Network Setup**:
+    - Sets WiFi to STA mode and creates tasks for WiFi connection (`connect_to_wifi`) and scanning (`scanManager`).
+  - **Timer Setup**:
+    - Creates a FreeRTOS hourly timer (`hourlyTimer`) with `timerCallback()`.
+  - **Network Management**:
+    - Starts the network manager task which manages AWS connection and other network-related operations.
+  - **Bin Full Check**:
+    - Checks binFull for the small and big ewaste compartments at the end of the setup();
+
+### networkManager()
+- **Purpose**:  
+  Continuously manages network connectivity, AWS IoT Core connection, OTA updates, and various system operations.
+- **Functionality**:
+  - Loops indefinitely with periodic delays using FreeRTOS.
+  - Processes incoming IoT messages by calling `IoTclient.loop()`.
+  - Handles OTA download, bin registration, and failsafe conditions.
+  - Sets up captive portals for configuration in cases when WiFi credentials or compartment configurations are missing.
+  - Checks and handles various failure counters (OTA, adding points, EAN validations) and upon reaching limits, switches to failsafe mode.
+  - Manages uploading sensor feedback and diagnostic information at specific times.
+
+### loop()
+- **Purpose**:  
+  The main loop function which primarily yields to FreeRTOS tasks.
+- **Functionality**:
+  - Simply yields and delays, ensuring that the FreeRTOS multitasking scheduler continues to manage background tasks.
+
+---
+
+## Overall Design and Flow
+
+1. **Initialization Phase (setup)**:
+   - The hardware, sensors, and peripherals are initialized.
+   - System configuration (such as AWS endpoint, chip ID, preferences) is loaded.
+   - Network connectivity tasks are scheduled.
+   - Compartment and LED configurations are established.
+2. **Task Management**:
+   - Multiple tasks run concurrently handling barcode scanning, networking, uploading (to AWS IoT), and EAN code management.
+   - A timer periodically executes to ensure system health via heartbeat checks.
+3. **Network and Error Handling**:
+   - The network manager continuously monitors connection status.
+   - Failsafe procedures are implemented in case of connectivity or update failures.
+4. **Operational Loop (loop)**:
+   - The main loop maintains control by yielding to FreeRTOS to manage tasks effectively.
+
+---
+
+## Header Files
+
+## 1. A7670Modem.h
+- it's not used in the code
+
+## 2. awsiotcore.h
+- Includes libraries for MQTT, secure WiFi, and SSL client support.
+- Declares global secure clients and an MQTT client for AWS IoT communications.
+- Sets up MQTT topics based on a provided country code.
+- Provides OTA update functionality with version checking, downloading, and retry logic.
+- Manages card data updates and device shadow reporting via JSON.
+- Implements functions to restart the device and replace string placeholders.
+- Prepares IoT topics, registers device shadow, and saves AWS IoT certificates.
+- Handles AWS IoT provisioning, secure connection setup, and MQTT message processing.
+
+## 3. compartments.h
+
+- Includes essential libraries for hardware serial, FreeRTOS, ESP system functions, and memory management.
+- Declares external functions for uploading data (e.g., bottle info, fake drops) and initiating upload tasks.
+- Defines the Compartment class which manages EAN (European Article Number) data:
+  - Handles compartment configuration including enabling, setting names, file paths, and EAN download links.
+  - Provides methods to refresh and validate EAN lists from the LittleFS file system.
+  - Offers functions to download EAN lists via HTTP (both WiFi and SimCom) with retry logic.
+- Implements utility functions for serial communications:
+  - Reading incoming EANs.
+  - Reading and writing to the serial interface.
+- Contains functions to distinguish and validate collection cards and standard cards.
+- Implements sensor-based functions:
+  - waitforbottle(): Uses range sensors to detect bottle drops with hysteresis and state management.
+  - materialIncoming(): Handles material (e.g., bottle) detection, updates counters, and triggers uploads.
+  - updateThresholds() and checkExitCondition(): Update sensor thresholds and determine exit conditions based on sensor readings.
+  - waitforcollection() and wasteDetection(): Monitor collection processes and detect waste bottle presence.
+- Provides placeholder function for validating white label EANs.
+
+## 4. connectivity.h
+- Includes libraries for WiFi, ESP events, AsyncWebServer, DNS handling, and ping testing.
+- Sets up global objects: DNSServer, AsyncWebServer (port 80), and a WiFiClient.
+- Provides functions to test internet connectivity by pinging Google's DNS (8.8.8.8) and check WiFi connection status.
+- Generates HTML pages for WiFi configuration and compartment selection (with country options) via helper functions.
+- Configures a DNS server to redirect all requests to a specified local IP (captive portal support).
+- Implements starting a soft access point (AP) with custom SSID, password, IP configuration, and fixes for Android compatibility.
+- Sets up the AsyncWebServer with routes for captive portal redirection, serving the WiFi configuration page, and handling WiFi/compartment configuration submissions.
+- Provides a fallback WiFi connection method and functions to connect to WiFi by scanning available networks and matching credentials.
+- Includes routines for restarting WiFi after connection failures.
+- Contains functions for publishing IoT data (collection, bottle info, fake drops, barcode scans, sensor feedback, and issue reporting) via MQTT, along with PUBACK validation and offline storage logic.
+- Implements device registration and bin linking by constructing and publishing JSON payloads to designated MQTT topics.
+
+
+## 5. globals.h
+- Defines hardware constants and macros (e.g., scanRX, HOUR_IN_MS, TICKS_PER_MS) for timing and I/O.
+- Establishes global state flags and variables for timer status, EAN availability, SMS checking, and OTA operations.
+- Sets up connectivity parameters including WiFi credentials, fallback SSIDs, captive portal configurations, and HTTP client instance.
+- Declares AWS IoT-related variables including endpoints, certificates, and MQTT topic strings for device shadow and messaging.
+- Contains global declarations for sensor and hardware interfaces:
+  - I2C multiplexer addresses and sensor objects (INA3221, INA219, VL6180X, VL53L0X).
+  - Global arrays and objects for LED strips, servo pins, and lock pins.
+- Defines operational thresholds, hysteresis values, and bottle count variables for compartment usage monitoring.
+- Provides utility functions like compVaildation() and turnLock() to support compartment management and hardware control.
+- Includes various global strings and configuration variables for device identification, network time, and system preferences.
+
+## 6. inputoutput.h
+- Manages servo motor control and lock actuation:
+  - Defines multiple Servo objects and provides functions to open, close, zero, and calibrate servos.
+  - Implements routines like actuatorsBegin(), servoTesting(), and bottleStuck() for servo operation and diagnostics.
+- Handles LED strip effects using FastLED:
+  - Provides a range of LED animations, including color filling, pulsing, loading, rainbow, breathing, and fake/bottle drop effects.
+  - Includes functions such as turnOffRGB(), colorEffect(), pulsingWhiteEffectF(), pulsingGreyEffectS(), and calibrationeffect().
+- Performs sensor initialization and measurements:
+  - Initializes I2C devices, sets up Wire communication, and configures I2C multiplexers.
+  - Initializes current sensors (INA3221 and INA219) for monitoring compartment current readings.
+  - Implements measurement functions like VAvrage() and getUsage() to compute sensor distance averages and bin usage percentages.
+- Provides sensor detection and compartment configuration:
+  - Defines structs for horizontal and vertical sensor configurations in each compartment.
+  - Implements functions (DetectCompartment(), diagnoseSensors()) to verify sensor connectivity using VL6180X/VL53L0X sensors through multiplexer channels.
+  - Contains functions for testing and printing sensor readings, including getLoxRanges() and printSensorReads().
+  
+Overall, inputoutputs.h integrates servo control, LED animations, sensor measurements, and sensor configuration to manage user inputs and hardware outputs in the smart bin system.
+
+## 7. storage.h
+- Includes FS, LittleFS, and Preferences libraries for file system and configuration management.
+- Declares global variables for EAN data and read/write locks.
+- Implements getPref() to load device and compartment preferences from persistent storage.
+- Implements PrintPref() to log the stored configuration values for debugging.
+- Provides file I/O functions:
+  - readFromFile(): Reads file content returning a String.
+  - writeFile(): Writes a string to a file with error handling.
+  - deleteFile(): Deletes a file with retry logic.
+  - appendFile(): Appends data to a file, with an alternative version commented out.
+- Implements functions for memory diagnostics:
+  - printMemoryUsage(): Prints heap and LittleFS usage.
+  - checkHeapIntegrity(): Checks for heap corruption.
+- Implements filesBegin() to initialize and mount LittleFS, format if necessary, and ensure required files (e.g., cards.txt) exist.
+
+
+## 8. systemfunctions.h
+- Provides system-level utility functions.
+- Manages timers, WiFi/network configuration, and device partition handling.
+- Implements JSON processing, chip and MAC identification, and OTA update routines.
+- Offers various helper routines for string and data conversions.
+
+---
